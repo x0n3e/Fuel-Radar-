@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>⛽ FUEL RADAR</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0a0a0f;color:#e2e8f0;font-family:'Courier New','Lucida Console',monospace;min-height:100vh}
+  input[type=range]{width:100%;cursor:pointer}
+  input[type=text]{outline:none}
+  a{text-decoration:none}
+  button{cursor:pointer;font-family:inherit}
+  @keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+  .grid-bg{
+    position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:linear-gradient(rgba(245,158,11,.03)1px,transparent 1px),linear-gradient(90deg,rgba(245,158,11,.03)1px,transparent 1px);
+    background-size:40px 40px;
+  }
+</style>
+</head>
+<body>
+<div class="grid-bg"></div>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+const FUEL_TYPES = [
+  { key:"Precio Gasolina 95 E5",              label:"Gasolina 95",    short:"95",  color:"#f59e0b" },
+  { key:"Precio Gasolina 98 E5",              label:"Gasolina 98",    short:"98",  color:"#10b981" },
+  { key:"Precio Gasoil A",                    label:"Diesel",         short:"DSL", color:"#3b82f6" },
+  { key:"Precio Gasoil Premium",              label:"Diesel Premium", short:"D+",  color:"#8b5cf6" },
+  { key:"Precio Gases licuados del petroleo", label:"GLP",            short:"GLP", color:"#ec4899" },
+  { key:"Precio Gas Natural Comprimido",      label:"GNC",            short:"GNC", color:"#06b6d4" },
+];
+
+function haversine(lat1,lon1,lat2,lon2){
+  const R=6371,dLat=((lat2-lat1)*Math.PI)/180,dLon=((lon2-lon1)*Math.PI)/180;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+function parsePrice(str){
+  if(!str||str.trim()==="")return null;
+  const v=parseFloat(str.replace(",","."));
+  return isNaN(v)?null:v;
+}
+
+function App(){
+  const [location,setLocation]     = useState(null);
+  const [stations,setStations]     = useState([]);
+  const [filtered,setFiltered]     = useState([]);
+  const [radius,setRadius]         = useState(5);
+  const [fuelType,setFuelType]     = useState(FUEL_TYPES[0].key);
+  const [loading,setLoading]       = useState(false);
+  const [geoError,setGeoError]     = useState(null);
+  const [fetchError,setFetchError] = useState(null);
+  const [fetched,setFetched]       = useState(false);
+  const [sortDir,setSortDir]       = useState("asc");
+  const [locating,setLocating]     = useState(false);
+  const [showManual,setShowManual] = useState(false);
+  const [manualLat,setManualLat]   = useState("");
+  const [manualLon,setManualLon]   = useState("");
+  const [locMethod,setLocMethod]   = useState(null);
+
+  const tryIpGeo = useCallback(async () => {
+    try{
+      const r=await fetch("https://ip-api.com/json/?fields=lat,lon,status,city");
+      const d=await r.json();
+      if(d.status==="success"){
+        setLocation({lat:d.lat,lon:d.lon,city:d.city});
+        setLocMethod("ip"); setLocating(false); return true;
+      }
+    }catch(e){}
+    return false;
+  },[]);
+
+  const getLocation = useCallback(async () => {
+    setLocating(true); setGeoError(null); setShowManual(false);
+    if(navigator.geolocation){
+      navigator.geolocation.getCurrentPosition(
+        pos=>{
+          setLocation({lat:pos.coords.latitude,lon:pos.coords.longitude});
+          setLocMethod("gps"); setLocating(false);
+        },
+        async ()=>{
+          const ok=await tryIpGeo();
+          if(!ok){ setGeoError("GPS bloqueado. Introduce coordenadas manualmente."); setShowManual(true); setLocating(false); }
+        },
+        {timeout:6000,enableHighAccuracy:false}
+      );
+    } else {
+      const ok=await tryIpGeo();
+      if(!ok){ setGeoError("Introduce coordenadas manualmente."); setShowManual(true); setLocating(false); }
+    }
+  },[tryIpGeo]);
+
+  const applyManual = useCallback(()=>{
+    const lat=parseFloat(manualLat.replace(",","."));
+    const lon=parseFloat(manualLon.replace(",","."));
+    if(isNaN(lat)||isNaN(lon)){ setGeoError("Coordenadas invalidas. Ej lat: 40.4168 / lon: -3.7038"); return; }
+    setLocation({lat,lon}); setLocMethod("manual"); setGeoError(null); setShowManual(false);
+  },[manualLat,manualLon]);
+
+  useEffect(()=>{ getLocation(); },[]);
+
+  const fetchStations = useCallback(async ()=>{
+    if(!location) return;
+    setLoading(true); setFetchError(null);
+    try{
+      const res=await fetch(
+        "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/",
+        {headers:{Accept:"application/json"}}
+      );
+      const data=await res.json();
+      setStations(data.ListaEESSPrecio||[]); setFetched(true);
+    }catch(e){ setFetchError("Error al obtener datos. Comprueba conexion."); }
+    setLoading(false);
+  },[location]);
+
+  useEffect(()=>{ if(location&&!fetched) fetchStations(); },[location,fetched]);
+
+  useEffect(()=>{
+    if(!stations.length||!location) return;
+    const results=stations.map(s=>{
+      const lat=parseFloat(s["Latitud"]?.replace(",","."));
+      const lon=parseFloat(s["Longitud (WGS84)"]?.replace(",","."));
+      const price=parsePrice(s[fuelType]);
+      if(isNaN(lat)||isNaN(lon)||price===null) return null;
+      const dist=haversine(location.lat,location.lon,lat,lon);
+      if(dist>radius) return null;
+      return {...s,_lat:lat,_lon:lon,_price:price,_dist:dist};
+    }).filter(Boolean).sort((a,b)=>sortDir==="asc"?a._price-b._price:b._price-a._price);
+    setFiltered(results);
+  },[stations,location,radius,fuelType,sortDir]);
+
+  const cf   = FUEL_TYPES.find(f=>f.key===fuelType);
+  const minP = filtered.length?filtered[0]._price:null;
+  const maxP = filtered.length?filtered[filtered.length-1]._price:null;
+  const locBadge = locMethod==="gps"?{l:"GPS",c:"#10b981"}:locMethod==="ip"?{l:"IP~",c:"#f59e0b"}:locMethod==="manual"?{l:"MANUAL",c:"#8b5cf6"}:null;
+
+  return(
+    <div style={{position:"relative",zIndex:1,maxWidth:860,margin:"0 auto",padding:"20px 14px"}}>
+
+      <div style={{marginBottom:22}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:3,flexWrap:"wrap"}}>
+          <span style={{fontSize:26,filter:"drop-shadow(0 0 8px #f59e0b)"}}>&#9981;</span>
+          <h1 style={{fontSize:20,fontWeight:700,letterSpacing:3,color:"#f59e0b",textTransform:"uppercase"}}>FUEL RADAR</h1>
+          <span style={{background:"rgba(245,158,11,0.1)",border:"1px solid rgba(245,158,11,0.3)",padding:"2px 7px",fontSize:9,letterSpacing:2,color:"#f59e0b"}}>ESP</span>
+          {locBadge&&<span style={{background:"rgba(0,0,0,0.3)",border:`1px solid ${locBadge.c}55`,padding:"2px 7px",fontSize:9,color:locBadge.c}}>{locBadge.l}</span>}
+        </div>
+        <p style={{fontSize:10,color:"#64748b",letterSpacing:1}}>
+          DATOS EN TIEMPO REAL · MINETUR · {new Date().toLocaleDateString("es-ES")}{location&&location.city?` · ${location.city}`:""}
+        </p>
+      </div>
+
+      <div style={{background:"rgba(15,15,25,0.95)",border:"1px solid rgba(245,158,11,0.2)",borderRadius:4,padding:18,marginBottom:14}}>
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:9,letterSpacing:2,color:"#64748b",marginBottom:8,textTransform:"uppercase"}}>Combustible</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {FUEL_TYPES.map(f=>(
+              <button key={f.key} onClick={()=>setFuelType(f.key)}
+                style={{padding:"6px 11px",fontSize:11,
+                  background:fuelType===f.key?f.color:"rgba(255,255,255,0.03)",
+                  color:fuelType===f.key?"#0a0a0f":"#94a3b8",
+                  border:`1px solid ${fuelType===f.key?f.color:"rgba(255,255,255,0.1)"}`,
+                  borderRadius:2,fontWeight:fuelType===f.key?700:400,letterSpacing:1,transition:"all 0.15s"}}>
+                {f.short}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:9,letterSpacing:2,color:"#64748b",marginBottom:6,textTransform:"uppercase"}}>
+            Radio: <span style={{color:cf.color,fontWeight:700}}>{radius} km</span>
+          </div>
+          <input type="range" min={1} max={50} value={radius} onChange={e=>setRadius(Number(e.target.value))} style={{accentColor:cf.color}}/>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#334155",marginTop:1}}><span>1km</span><span>25km</span><span>50km</span></div>
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button onClick={()=>setSortDir(d=>d==="asc"?"desc":"asc")}
+            style={{padding:"7px 12px",fontSize:9,letterSpacing:1,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",color:"#94a3b8",borderRadius:2}}>
+            {sortDir==="asc"?"UP MAS BARATO":"DOWN MAS CARO"}
+          </button>
+          <button onClick={()=>{setFetched(false);fetchStations();}} disabled={loading||!location}
+            style={{padding:"7px 12px",fontSize:9,letterSpacing:1,background:"rgba(245,158,11,0.1)",border:"1px solid rgba(245,158,11,0.3)",color:"#f59e0b",borderRadius:2}}>
+            {loading?"CARGANDO...":"ACTUALIZAR"}
+          </button>
+          <button onClick={()=>setShowManual(m=>!m)}
+            style={{padding:"7px 12px",fontSize:9,letterSpacing:1,background:"rgba(139,92,246,0.08)",border:"1px solid rgba(139,92,246,0.25)",color:"#8b5cf6",borderRadius:2}}>
+            UBICACION
+          </button>
+        </div>
+      </div>
+
+      {geoError&&(
+        <div style={{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"10px 14px",marginBottom:12,fontSize:11,color:"#ef4444"}}>
+          {geoError}
+          <button onClick={getLocation} style={{marginLeft:10,background:"none",border:"1px solid #ef4444",color:"#ef4444",padding:"2px 7px",fontSize:9,borderRadius:2}}>REINTENTAR</button>
+        </div>
+      )}
+
+      {showManual&&(
+        <div style={{background:"rgba(15,15,25,0.95)",border:"1px solid rgba(139,92,246,0.35)",borderRadius:4,padding:"14px",marginBottom:14}}>
+          <div style={{fontSize:9,letterSpacing:2,color:"#8b5cf6",marginBottom:6,textTransform:"uppercase"}}>Ubicacion manual</div>
+          <div style={{fontSize:9,color:"#475569",marginBottom:10}}>
+            Google Maps - manten pulsado tu posicion - copia los numeros que aparecen
+          </div>
+          <div style={{display:"flex",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+            <input type="text" placeholder="Latitud  ej: 40.6893" value={manualLat} onChange={e=>setManualLat(e.target.value)}
+              style={{flex:1,minWidth:130,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:2,padding:"8px 10px",color:"#e2e8f0",fontSize:11,fontFamily:"inherit"}}/>
+            <input type="text" placeholder="Longitud  ej: -3.6895" value={manualLon} onChange={e=>setManualLon(e.target.value)}
+              style={{flex:1,minWidth:130,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:2,padding:"8px 10px",color:"#e2e8f0",fontSize:11,fontFamily:"inherit"}}/>
+          </div>
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <button onClick={applyManual}
+              style={{padding:"8px 16px",fontSize:9,letterSpacing:1,background:"rgba(139,92,246,0.15)",border:"1px solid rgba(139,92,246,0.4)",color:"#8b5cf6",borderRadius:2}}>
+              USAR ESTAS COORDENADAS
+            </button>
+            <button onClick={getLocation}
+              style={{padding:"8px 12px",fontSize:9,letterSpacing:1,background:"rgba(16,185,129,0.08)",border:"1px solid rgba(16,185,129,0.25)",color:"#10b981",borderRadius:2}}>
+              REINTENTAR GPS/IP
+            </button>
+          </div>
+        </div>
+      )}
+
+      {fetchError&&(
+        <div style={{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:4,padding:"10px 14px",marginBottom:12,fontSize:11,color:"#ef4444"}}>{fetchError}</div>
+      )}
+
+      {(loading||locating)&&(
+        <div style={{textAlign:"center",padding:36}}>
+          <div style={{fontSize:10,letterSpacing:3,color:"#f59e0b",animation:"pulse 1.5s infinite"}}>
+            {locating?"OBTENIENDO UBICACION...":"CARGANDO GASOLINERAS..."}
+          </div>
+        </div>
+      )}
+
+      {!loading&&filtered.length>0&&(
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
+          {[
+            {label:"Total",  value:filtered.length,               color:"#f59e0b"},
+            {label:"Min",    value:minP?`${minP.toFixed(3)}e`:"-",color:"#10b981"},
+            {label:"Max",    value:maxP?`${maxP.toFixed(3)}e`:"-",color:"#ef4444"},
+            {label:"Tipo",   value:cf.short,                      color:cf.color},
+          ].map(s=>(
+            <div key={s.label} style={{background:"rgba(15,15,25,0.9)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:4,padding:"8px 10px"}}>
+              <div style={{fontSize:8,color:"#475569",letterSpacing:1,marginBottom:2}}>{s.label.toUpperCase()}</div>
+              <div style={{fontSize:14,fontWeight:700,color:s.color}}>{s.value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!loading&&!locating&&filtered.length===0&&fetched&&(
+        <div style={{textAlign:"center",padding:36,color:"#334155",fontSize:10,letterSpacing:2}}>
+          SIN RESULTADOS EN {radius} KM - AMPLIA EL RADIO
+        </div>
+      )}
+
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {filtered.map((s,i)=>{
+          const isBest=i===0&&sortDir==="asc";
+          const prRange=(maxP-minP)||1;
+          const pctFill=((s._price-minP)/prRange)*100;
+          const mapsUrl=`https://www.google.com/maps/dir/?api=1&destination=${s._lat},${s._lon}`;
+          const wazeUrl=`https://waze.com/ul?ll=${s._lat},${s._lon}&navigate=yes`;
+          const others=FUEL_TYPES.filter(f=>f.key!==fuelType).map(f=>({...f,price:parsePrice(s[f.key])})).filter(f=>f.price!==null);
+          return(
+            <div key={i} style={{
+              background:isBest?"rgba(16,185,129,0.06)":"rgba(15,15,25,0.9)",
+              border:`1px solid ${isBest?"rgba(16,185,129,0.4)":"rgba(255,255,255,0.07)"}`,
+              borderRadius:4,padding:"13px 14px",position:"relative",overflow:"hidden",
+              animation:"fadeIn 0.2s ease forwards",
+            }}>
+              <div style={{position:"absolute",left:0,top:0,bottom:0,width:`${100-pctFill}%`,background:`linear-gradient(90deg,${cf.color}09,transparent)`,pointerEvents:"none"}}/>
+              <div style={{position:"relative",display:"flex",gap:10,alignItems:"flex-start"}}>
+                <div style={{
+                  minWidth:26,height:26,display:"flex",alignItems:"center",justifyContent:"center",
+                  background:isBest?"rgba(16,185,129,0.2)":"rgba(255,255,255,0.04)",
+                  border:`1px solid ${isBest?"rgba(16,185,129,0.5)":"rgba(255,255,255,0.08)"}`,
+                  borderRadius:2,fontSize:10,fontWeight:700,color:isBest?"#10b981":"#475569",flexShrink:0,
+                }}>
+                  {isBest?"*":`#${i+1}`}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:6,flexWrap:"wrap"}}>
+                    <div style={{minWidth:0,flex:1}}>
+                      <div style={{fontSize:12,fontWeight:700,color:"#e2e8f0",marginBottom:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                        {s["Rotulo"]||s["\u00d4\u00c2\u00d6\u00e3\u00e5\u00cc\u00ef"]||s["R\u00f3tulo"]||"Sin nombre"}
+                        {isBest&&<span style={{marginLeft:6,fontSize:8,background:"rgba(16,185,129,0.2)",color:"#10b981",padding:"2px 5px"}}>MEJOR</span>}
+                      </div>
+                      <div style={{fontSize:9,color:"#475569"}}>{s["Direcci\u00f3n"]||s["Direccion"]||""}, {s["Localidad"]||""}</div>
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0}}>
+                      <div style={{fontSize:20,fontWeight:700,color:cf.color,lineHeight:1}}>
+                        {s._price.toFixed(3)}<span style={{fontSize:10}}> EUR</span>
+                      </div>
+                      <div style={{fontSize:8,color:"#334155",marginTop:1}}>{cf.short} {s._dist.toFixed(1)}km</div>
+                    </div>
+                  </div>
+                  {others.length>0&&(
+                    <div style={{display:"flex",gap:4,marginTop:7,flexWrap:"wrap"}}>
+                      {others.map(f=>(
+                        <span key={f.key} style={{fontSize:8,padding:"2px 5px",background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",color:"#475569",borderRadius:2}}>
+                          <span style={{color:f.color}}>{f.short}</span> {f.price.toFixed(3)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{display:"flex",gap:7,marginTop:9,flexWrap:"wrap"}}>
+                    <a href={mapsUrl} target="_blank" rel="noreferrer"
+                      style={{fontSize:9,padding:"5px 10px",background:"rgba(66,133,244,0.1)",border:"1px solid rgba(66,133,244,0.3)",color:"#4285f4",borderRadius:2}}>
+                      Maps
+                    </a>
+                    <a href={wazeUrl} target="_blank" rel="noreferrer"
+                      style={{fontSize:9,padding:"5px 10px",background:"rgba(0,209,148,0.07)",border:"1px solid rgba(0,209,148,0.25)",color:"#00d194",borderRadius:2}}>
+                      Waze
+                    </a>
+                    {s["Horario"]&&<span style={{fontSize:8,color:"#334155",alignSelf:"center"}}>{s["Horario"]}</span>}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{marginTop:20,paddingTop:12,borderTop:"1px solid rgba(255,255,255,0.05)",fontSize:8,color:"#1e293b",letterSpacing:1,textAlign:"center"}}>
+        DATOS: MINETUR - GEOVES - MINISTERIO TRANSICION ECOLOGICA
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
